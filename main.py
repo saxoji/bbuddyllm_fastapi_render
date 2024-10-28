@@ -31,7 +31,7 @@ class TTSRequest(BaseModel):
     flowise_id: str
     id: str
     pwd: str
-    timezone: str
+    timezone: int
     order: str
 
 async def update_airtable_record(base_id, table_id, api_key, record_id, update_data):
@@ -73,7 +73,7 @@ async def assign_buddy_work(request: TTSRequest, background_tasks: BackgroundTas
                     "user_pwd": request.pwd,
                     "category": "buddy_chat",
                     "order": request.order,
-                    "timezone": request.timezone,
+                    "timezone": int(request.timezone),
                     "status": "running",
                 }
             }

@@ -3,6 +3,10 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import requests
 import datetime
+import logging
+
+# Logging configuration
+logging.basicConfig(level=logging.INFO)
 
 SWAGGER_HEADERS = {
     "title": "LINKBRICKS HORIZON-AI LLM BUDDY API ENGINE",
@@ -60,6 +64,7 @@ def call_buddy_api(flowise_id, order):
 async def assign_buddy_work(request: TTSRequest, background_tasks: BackgroundTasks):
     # Check the auth key
     if request.auth_key != REQUIRED_AUTH_KEY:
+        logging.error("Invalid authentication key")
         raise HTTPException(status_code=403, detail="Invalid authentication key")
 
     # Create Airtable record
@@ -85,8 +90,10 @@ async def assign_buddy_work(request: TTSRequest, background_tasks: BackgroundTas
         ]
     }
 
+    logging.info("Creating Airtable record...")
     response = requests.post(url, json=body, headers=headers)
     if not response.ok:
+        logging.error(f"Failed to create record: {response.text}")
         # Update status to assign_failed if record creation fails
         body["records"][0]["fields"]["status"] = "assign_failed"
         raise HTTPException(status_code=response.status_code, detail=f"Failed to create record: {response.text}")
@@ -94,15 +101,19 @@ async def assign_buddy_work(request: TTSRequest, background_tasks: BackgroundTas
     data = response.json()
     record_id = data['records'][0]['id']
 
+    logging.info("Successfully created Airtable record. Scheduling background task...")
+
     # Schedule the background task without waiting
     background_tasks.add_task(process_buddy_work_background, request, record_id)
 
+    logging.info("Returning response to client...")
     # Return response to client immediately after scheduling background task
     return {"message": "Successfully assigned Buddy Work"}
 
 def process_buddy_work_background(request: TTSRequest, record_id: str):
     try:
         # Call Buddy API
+        logging.info("Calling Buddy API...")
         buddy_result = call_buddy_api(request.flowise_id, request.order)
         result_text = buddy_result.get("text", "No result text available")
 
@@ -112,15 +123,18 @@ def process_buddy_work_background(request: TTSRequest, record_id: str):
             "result": result_text,
             "end_date": datetime.datetime.utcnow().isoformat()
         }
+        logging.info("Updating Airtable record with success status...")
         update_airtable_record(request.base_id, request.table_id, request.airtable_api_key, record_id, update_data)
 
     except Exception as error:
         # Update Airtable record with failure status
+        logging.error(f"Error occurred: {error}")
         update_data = {
             "status": "failed",
             "result": f"Buddy work failed: {str(error)}",
             "end_date": datetime.datetime.utcnow().isoformat()
         }
+        logging.info("Updating Airtable record with failure status...")
         update_airtable_record(request.base_id, request.table_id, request.airtable_api_key, record_id, update_data)
 
 if __name__ == "__main__":

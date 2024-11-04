@@ -4,7 +4,6 @@ from pydantic import BaseModel
 import requests
 import datetime
 import logging
-import os
 
 # Logging configuration
 logging.basicConfig(level=logging.INFO)
@@ -48,18 +47,21 @@ def update_airtable_record(base_id, table_id, api_key, record_id, update_data):
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
-    response = requests.patch(url, json={"fields": update_data}, headers=headers, timeout=10)
-    if not response.ok:
-        raise HTTPException(status_code=response.status_code, detail=f"Failed to update record: {response.text}")
-    return response.json()
+    try:
+        response = requests.patch(url, json={"fields": update_data}, headers=headers, timeout=10)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Failed to update record: {e}")
 
 def call_buddy_api(flowise_id, order):
     api_url = f"https://ai.linkbricks.com/api/v1/prediction/{flowise_id}"
-    response = requests.post(api_url, json={"question": order}, timeout=10)
-    if response.ok:
+    try:
+        response = requests.post(api_url, json={"question": order}, timeout=10)
+        response.raise_for_status()
         return response.json()
-    else:
-        raise HTTPException(status_code=response.status_code, detail=f"Buddy API call failed: {response.text}")
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Buddy API call failed: {e}")
+        return None
 
 @app.post("/assign_buddy_work/")
 async def assign_buddy_work(request: TTSRequest, background_tasks: BackgroundTasks):
@@ -88,30 +90,33 @@ async def assign_buddy_work(request: TTSRequest, background_tasks: BackgroundTas
     }
 
     logging.info("Creating Airtable record...")
-    response = requests.post(url, json=body, headers=headers, timeout=10)
-    if not response.ok:
-        logging.error(f"Failed to create record: {response.text}")
-        # Update status to assign_failed if record creation fails
-        body["fields"]["status"] = "assign_failed"
-        raise HTTPException(status_code=response.status_code, detail=f"Failed to create record: {response.text}")
+    try:
+        response = requests.post(url, json=body, headers=headers, timeout=10)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Failed to create record: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create Airtable record")
 
     data = response.json()
     record_id = data['id']
 
-    logging.info("Successfully created Airtable record. Scheduling background task...")
+    logging.info("Successfully created Airtable record. Returning response to client...")
+    # Return response to client immediately after scheduling background task
+    response_message = {"message": "Successfully assigned Buddy Work"}
 
     # Schedule the background task without waiting
     background_tasks.add_task(process_buddy_work_background, request, record_id)
 
-    logging.info("Returning response to client...")
-    # Return response to client immediately after scheduling background task
-    return {"message": "Successfully assigned Buddy Work"}
+    return response_message
 
 def process_buddy_work_background(request: TTSRequest, record_id: str):
     try:
         # Call Buddy API
         logging.info("Calling Buddy API...")
         buddy_result = call_buddy_api(request.flowise_id, request.order)
+        if buddy_result is None:
+            raise Exception("Buddy API call failed")
+
         result_text = buddy_result.get("text", "No result text available")
 
         # Update Airtable record with success status

@@ -105,14 +105,13 @@ async def assign_buddy_work(request: TTSRequest, background_tasks: BackgroundTas
     data = response.json()
     record_id = data['id']
 
-    logging.info("Successfully created Airtable record. Returning response to client...")
-    # Return response to client immediately
-    response_message = {"message": "Successfully assigned Buddy Work"}
-    
-    # Return response before scheduling the background task
+    logging.info("Successfully created Airtable record. Scheduling background task...")
+    # Schedule the background task without waiting
     background_tasks.add_task(process_buddy_work_background, request, record_id)
 
-    return response_message
+    logging.info("Returning response to client...")
+    # Return response to client immediately
+    return {"message": "Successfully assigned Buddy Work"}
 
 def process_buddy_work_background(request: TTSRequest, record_id: str):
     try:

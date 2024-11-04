@@ -1,5 +1,6 @@
 import uvicorn
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTask
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import requests
 import datetime
@@ -52,44 +53,38 @@ def update_airtable_record(base_id, table_id, api_key, record_id, update_data):
     try:
         response = requests.patch(url, json={"fields": update_data}, headers=headers, timeout=10)
         response.raise_for_status()
-        return response.json()
     except requests.exceptions.RequestException as e:
         logging.error(f"Failed to update record: {e}")
-        raise
 
 def call_buddy_api(flowise_id, order, retries=3, delay=5):
     api_url = f"https://ai.linkbricks.com/api/v1/prediction/{flowise_id}"
-    last_error = None
-    
     for attempt in range(retries):
         try:
-            response = requests.post(api_url, json={"question": order}, timeout=30)
+            response = requests.post(api_url, json={"question": order})
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            last_error = e
             logging.error(f"Buddy API call failed (attempt {attempt + 1} of {retries}): {e}")
             if attempt < retries - 1:
                 time.sleep(delay)
-    
-    raise last_error
+            else:
+                return None
 
 @app.post("/assign_buddy_work/")
-async def assign_buddy_work(request: TTSRequest, background_tasks: BackgroundTasks):
+async def assign_buddy_work(request: TTSRequest):
     try:
-        # Validate auth key first
+        # Check the auth key
         if request.auth_key != REQUIRED_AUTH_KEY:
             logging.error("Invalid authentication key")
             raise HTTPException(status_code=403, detail="Invalid authentication key")
 
-        # Create initial Airtable record
+        # Create Airtable record
         url = f"https://api.airtable.com/v0/{request.base_id}/{request.table_id}"
         headers = {
             "Authorization": f"Bearer {request.airtable_api_key}",
             "Content-Type": "application/json"
         }
-        
-        initial_record = {
+        body = {
             "fields": {
                 "user_id": request.id,
                 "user_pwd": request.pwd,
@@ -98,90 +93,77 @@ async def assign_buddy_work(request: TTSRequest, background_tasks: BackgroundTas
                 "timezone": int(request.timezone),
                 "status": "running",
                 "chat_id": request.chat_id,
-                "session_id": request.session_id,
-                "start_date": datetime.datetime.utcnow().isoformat()
+                "session_id": request.session_id
             }
         }
 
         logging.info("Creating Airtable record...")
-        response = requests.post(url, json=initial_record, headers=headers, timeout=10)
+        response = requests.post(url, json=body, headers=headers, timeout=10)
         response.raise_for_status()
-        
-        record_id = response.json()['id']
-        
-        # Schedule the background task
-        logging.info(f"Scheduling background task for record {record_id}...")
-        background_tasks.add_task(
-            process_buddy_work_background,
-            request=request,
-            record_id=record_id
-        )
 
-        # Return success response immediately
-        return {
+        data = response.json()
+        record_id = data['id']
+
+        logging.info("Preparing response with background task...")
+        
+        # Prepare response data
+        response_data = {
             "status": "success",
             "message": "Successfully assigned Buddy Work",
             "record_id": record_id
         }
-
+        
+        # Create background task
+        background_task = BackgroundTask(
+            process_buddy_work_background,
+            request=request,
+            record_id=record_id
+        )
+        
+        # Return response with background task
+        logging.info("Returning response to client...")
+        return JSONResponse(
+            content=response_data,
+            background=background_task
+        )
+        
     except requests.exceptions.RequestException as e:
         logging.error(f"Airtable API error: {str(e)}")
-        raise HTTPException(status_code=502, detail="Failed to communicate with Airtable")
+        raise HTTPException(status_code=502, detail=f"Airtable API error occurred: {str(e)}")
     except Exception as e:
-        logging.error(f"Unexpected error: {str(e)}")
+        logging.error(f"Unexpected error occurred: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-async def process_buddy_work_background(request: TTSRequest, record_id: str):
+def process_buddy_work_background(request: TTSRequest, record_id: str):
     try:
-        # Call Buddy API with proper error handling
-        logging.info(f"Processing background task for record {record_id}...")
+        # Call Buddy API
+        logging.info("Calling Buddy API...")
         buddy_result = call_buddy_api(request.flowise_id, request.order)
-        
-        if not buddy_result:
-            raise ValueError("Empty response from Buddy API")
+        if buddy_result is None:
+            raise Exception("Buddy API call failed")
 
         result_text = buddy_result.get("text", "No result text available")
 
-        # Update Airtable with success status
+        # Update Airtable record with success status
         update_data = {
             "status": "finished",
             "result": result_text,
             "end_date": datetime.datetime.utcnow().isoformat()
         }
-        
-        logging.info(f"Updating record {record_id} with success status...")
-        update_airtable_record(
-            request.base_id,
-            request.table_id,
-            request.airtable_api_key,
-            record_id,
-            update_data
-        )
-        
-        logging.info(f"Successfully completed background task for record {record_id}")
+        logging.info("Updating Airtable record with success status...")
+        update_airtable_record(request.base_id, request.table_id, request.airtable_api_key, record_id, update_data)
 
     except Exception as error:
-        logging.error(f"Background task failed for record {record_id}: {str(error)}")
-        
-        # Update Airtable with failure status
-        try:
-            failure_data = {
-                "status": "failed",
-                "result": f"Error: {str(error)}",
-                "end_date": datetime.datetime.utcnow().isoformat()
-            }
-            
-            update_airtable_record(
-                request.base_id,
-                request.table_id,
-                request.airtable_api_key,
-                record_id,
-                failure_data
-            )
-        except Exception as update_error:
-            logging.error(f"Failed to update error status in Airtable: {str(update_error)}")
+        # Update Airtable record with failure status
+        logging.error(f"Error occurred: {error}")
+        update_data = {
+            "status": "failed",
+            "result": f"Buddy work failed: {str(error)}",
+            "end_date": datetime.datetime.utcnow().isoformat()
+        }
+        logging.info("Updating Airtable record with failure status...")
+        update_airtable_record(request.base_id, request.table_id, request.airtable_api_key, record_id, update_data)
 
 if __name__ == "__main__":
-    import os
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port, http='h11', keep_alive_timeout=5)

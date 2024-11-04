@@ -7,3 +7,4 @@ yt-dlp
 moviepy
 pytube
 opencv-contrib-python
+httpx

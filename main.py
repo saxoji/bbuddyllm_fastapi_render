@@ -1,5 +1,6 @@
 import uvicorn
-from fastapi import FastAPI, HTTPException, BackgroundTask
+from fastapi import FastAPI, HTTPException
+from starlette.background import BackgroundTask
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import requests
@@ -165,5 +166,4 @@ def process_buddy_work_background(request: TTSRequest, record_id: str):
         update_airtable_record(request.base_id, request.table_id, request.airtable_api_key, record_id, update_data)
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port, http='h11', keep_alive_timeout=5)
+    uvicorn.run(app, host="0.0.0.0", port=8000)

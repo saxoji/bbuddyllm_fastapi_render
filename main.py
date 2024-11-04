@@ -5,6 +5,7 @@ import requests
 import datetime
 import logging
 import time
+import asyncio
 
 # Logging configuration
 logging.basicConfig(level=logging.INFO)
@@ -70,50 +71,50 @@ def call_buddy_api(flowise_id, order, retries=3, delay=5):
 
 @app.post("/assign_buddy_work/")
 async def assign_buddy_work(request: TTSRequest, background_tasks: BackgroundTasks):
-    # Check the auth key
-    if request.auth_key != REQUIRED_AUTH_KEY:
-        logging.error("Invalid authentication key")
-        raise HTTPException(status_code=403, detail="Invalid authentication key")
-
-    # Create Airtable record
-    url = f"https://api.airtable.com/v0/{request.base_id}/{request.table_id}"
-    headers = {
-        "Authorization": f"Bearer {request.airtable_api_key}",
-        "Content-Type": "application/json"
-    }
-    body = {
-        "fields": {
-            "user_id": request.id,
-            "user_pwd": request.pwd,
-            "category": request.category,
-            "order": request.order,
-            "timezone": int(request.timezone),
-            "status": "running",
-            "chat_id": request.chat_id,
-            "session_id": request.session_id
-        }
-    }
-
-    logging.info("Creating Airtable record...")
     try:
+        # Check the auth key
+        if request.auth_key != REQUIRED_AUTH_KEY:
+            logging.error("Invalid authentication key")
+            raise HTTPException(status_code=403, detail="Invalid authentication key")
+
+        # Create Airtable record
+        url = f"https://api.airtable.com/v0/{request.base_id}/{request.table_id}"
+        headers = {
+            "Authorization": f"Bearer {request.airtable_api_key}",
+            "Content-Type": "application/json"
+        }
+        body = {
+            "fields": {
+                "user_id": request.id,
+                "user_pwd": request.pwd,
+                "category": request.category,
+                "order": request.order,
+                "timezone": int(request.timezone),
+                "status": "running",
+                "chat_id": request.chat_id,
+                "session_id": request.session_id
+            }
+        }
+
+        logging.info("Creating Airtable record...")
         response = requests.post(url, json=body, headers=headers, timeout=10)
         response.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Failed to create record: {e}")
-        raise HTTPException(status_code=500, detail="Failed to create Airtable record")
 
-    data = response.json()
-    record_id = data['id']
+        data = response.json()
+        record_id = data['id']
 
-    logging.info("Successfully created Airtable record. Scheduling background task...")
-    # Schedule the background task without waiting
-    background_tasks.add_task(process_buddy_work_background, request, record_id)
+        logging.info("Successfully created Airtable record. Scheduling background task...")
+        # Schedule the background task without waiting
+        background_tasks.add_task(process_buddy_work_background, request, record_id)
 
-    logging.info("Returning response to client...")
-    # Return response to client immediately
-    return {"message": "Successfully assigned Buddy Work"}
+        logging.info("Returning response to client...")
+        # Return response to client immediately
+        return {"message": "Successfully assigned Buddy Work"}
+    except Exception as e:
+        logging.error(f"Unexpected error occurred: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
-def process_buddy_work_background(request: TTSRequest, record_id: str):
+async def process_buddy_work_background(request: TTSRequest, record_id: str):
     try:
         # Call Buddy API
         logging.info("Calling Buddy API...")

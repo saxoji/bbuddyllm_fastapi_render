@@ -2,7 +2,6 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import httpx
-import asyncio
 import datetime
 from typing import Optional
 
@@ -23,8 +22,8 @@ SWAGGER_HEADERS = {
 
 app = FastAPI(**SWAGGER_HEADERS)
 
-# Async HTTP client
-async_client = httpx.AsyncClient(timeout=30.0)
+# Async HTTP client without timeout
+async_client = httpx.AsyncClient()
 
 REQUIRED_AUTH_KEY = "linkbricks-saxoji-benedict-ji-01034726435!@#$%231%$#@%"
 
@@ -123,25 +122,14 @@ async def assign_buddy_work(request: TTSRequest, background_tasks: BackgroundTas
 
 async def process_buddy_work_background(request: TTSRequest, record_id: str):
     try:
-        # Call Buddy API with timeout
-        buddy_result = await asyncio.wait_for(
-            call_buddy_api(request.flowise_id, request.order),
-            timeout=60.0  # 60 seconds timeout
-        )
-        
+        # Call Buddy API without timeout
+        buddy_result = await call_buddy_api(request.flowise_id, request.order)
         result_text = buddy_result.get("text", "No result text available")
         
         # Update Airtable with success status
         update_data = {
             "status": "finished",
             "result": result_text,
-            "end_date": datetime.datetime.utcnow().isoformat()
-        }
-        
-    except asyncio.TimeoutError:
-        update_data = {
-            "status": "timeout",
-            "result": "Processing took too long and timed out",
             "end_date": datetime.datetime.utcnow().isoformat()
         }
         

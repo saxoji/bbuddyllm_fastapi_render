@@ -3,6 +3,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import httpx
 import datetime
+import json
 from typing import Optional
 import asyncio
 import logging
@@ -28,8 +29,7 @@ SWAGGER_HEADERS = {
 
 app = FastAPI(**SWAGGER_HEADERS)
 
-# Airtable API 호출용 타임아웃 설정
-AIRTABLE_TIMEOUT = 30.0  # 30초
+AIRTABLE_TIMEOUT = 30.0
 MAX_RETRIES = 3
 
 REQUIRED_AUTH_KEY = "linkbricks-saxoji-benedict-ji-01034726435!@#$%231%$#@%"
@@ -50,31 +50,34 @@ class TTSRequest(BaseModel):
 
 @asynccontextmanager
 async def get_airtable_client():
-    """Airtable API 호출용 HTTP 클라이언트"""
     async with httpx.AsyncClient(timeout=AIRTABLE_TIMEOUT) as client:
         yield client
 
 @asynccontextmanager
 async def get_buddy_client():
-    """Buddy API 호출용 HTTP 클라이언트 (타임아웃 없음)"""
     async with httpx.AsyncClient(timeout=None) as client:
         yield client
 
-async def update_airtable_record(base_id: str, table_id: str, api_key: str, record_id: str, update_data: dict) -> dict:
+async def update_airtable_record(base_id: str, table_id: str, api_key: str, record_id: str, result: str) -> dict:
     url = f"https://api.airtable.com/v0/{base_id}/{table_id}/{record_id}"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
     
+    # result 필드만 업데이트
+    fields = {
+        "result": result
+    }
+    
     for attempt in range(MAX_RETRIES):
         try:
             async with get_airtable_client() as client:
-                response = await client.patch(url, json={"fields": update_data}, headers=headers)
+                response = await client.patch(url, json={"fields": fields}, headers=headers)
                 if response.is_success:
                     return response.json()
                 
-                if response.status_code >= 500:  # 서버 에러면 재시도
+                if response.status_code >= 500:
                     if attempt < MAX_RETRIES - 1:
                         await asyncio.sleep(2 ** attempt)
                         continue
@@ -112,25 +115,31 @@ async def call_buddy_api(flowise_id: str, order: str) -> dict:
         logger.error(f"Error calling Buddy API: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Buddy API call failed: {str(e)}")
 
-async def create_airtable_record(request: TTSRequest) -> tuple[str, dict]:
+async def create_airtable_record(request: TTSRequest) -> str:
     url = f"https://api.airtable.com/v0/{request.base_id}/{request.table_id}"
     headers = {
         "Authorization": f"Bearer {request.airtable_api_key}",
         "Content-Type": "application/json"
     }
+    
+    # 초기 상태 정보를 result 필드에 JSON으로 저장
+    initial_status = {
+        "status": "running",
+        "user_id": request.id,
+        "user_pwd": request.pwd,
+        "category": request.category,
+        "order": request.order,
+        "timezone": request.timezone,
+        "chat_id": request.chat_id,
+        "session_id": request.session_id,
+        "timestamp": datetime.datetime.utcnow().isoformat()
+    }
+    
     body = {
         "records": [
             {
                 "fields": {
-                    "user_id": request.id,
-                    "user_pwd": request.pwd,
-                    "category": request.category,
-                    "order": request.order,
-                    "timezone": int(request.timezone),
-                    "status": "running",
-                    "chat_id": request.chat_id,
-                    "session_id": request.session_id,
-                    "start_date": datetime.datetime.utcnow().isoformat()
+                    "result": json.dumps(initial_status)
                 }
             }
         ]
@@ -141,7 +150,7 @@ async def create_airtable_record(request: TTSRequest) -> tuple[str, dict]:
             response = await client.post(url, json=body, headers=headers)
             if response.is_success:
                 data = response.json()
-                return data['records'][0]['id'], body
+                return data['records'][0]['id']
             raise HTTPException(status_code=response.status_code,
                              detail=f"Failed to create record: {response.text}")
     
@@ -155,7 +164,7 @@ async def assign_buddy_work(request: TTSRequest, background_tasks: BackgroundTas
         raise HTTPException(status_code=403, detail="Invalid authentication key")
 
     try:
-        record_id, _ = await create_airtable_record(request)
+        record_id = await create_airtable_record(request)
         
         logger.info(f"Starting background task for record {record_id}")
         background_tasks.add_task(process_buddy_work_background, request, record_id)
@@ -174,17 +183,16 @@ async def process_buddy_work_background(request: TTSRequest, record_id: str):
     try:
         logger.info(f"Processing buddy work for record {record_id}")
         
-        # Buddy API 호출 - 타임아웃 없음
         buddy_result = await call_buddy_api(request.flowise_id, request.order)
         result_text = buddy_result.get("text", "No result text available")
         
         logger.info(f"Buddy API call successful for record {record_id}")
 
-        # Airtable 레코드 업데이트
-        update_data = {
+        # 결과 정보를 JSON으로 구성
+        result_data = {
             "status": "finished",
             "result": result_text,
-            "end_date": datetime.datetime.utcnow().isoformat()
+            "timestamp": datetime.datetime.utcnow().isoformat()
         }
         
         await update_airtable_record(
@@ -192,7 +200,7 @@ async def process_buddy_work_background(request: TTSRequest, record_id: str):
             request.table_id,
             request.airtable_api_key,
             record_id,
-            update_data
+            json.dumps(result_data)
         )
         
         logger.info(f"Successfully completed buddy work for record {record_id}")
@@ -201,11 +209,11 @@ async def process_buddy_work_background(request: TTSRequest, record_id: str):
         logger.error(f"Error in background task for record {record_id}: {str(error)}")
         
         try:
-            # 실패 상태 업데이트
-            update_data = {
+            # 에러 정보를 JSON으로 구성
+            error_data = {
                 "status": "failed",
-                "result": f"Processing failed: {str(error)}",
-                "end_date": datetime.datetime.utcnow().isoformat()
+                "error": str(error),
+                "timestamp": datetime.datetime.utcnow().isoformat()
             }
             
             await update_airtable_record(
@@ -213,7 +221,7 @@ async def process_buddy_work_background(request: TTSRequest, record_id: str):
                 request.table_id,
                 request.airtable_api_key,
                 record_id,
-                update_data
+                json.dumps(error_data)
             )
         except Exception as update_error:
             logger.error(f"Failed to update error status for record {record_id}: {str(update_error)}")

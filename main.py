@@ -4,6 +4,7 @@ from pydantic import BaseModel
 import requests
 import datetime
 import logging
+import time
 
 # Logging configuration
 logging.basicConfig(level=logging.INFO)
@@ -53,15 +54,19 @@ def update_airtable_record(base_id, table_id, api_key, record_id, update_data):
     except requests.exceptions.RequestException as e:
         logging.error(f"Failed to update record: {e}")
 
-def call_buddy_api(flowise_id, order):
+def call_buddy_api(flowise_id, order, retries=3, delay=5):
     api_url = f"https://ai.linkbricks.com/api/v1/prediction/{flowise_id}"
-    try:
-        response = requests.post(api_url, json={"question": order}, timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Buddy API call failed: {e}")
-        return None
+    for attempt in range(retries):
+        try:
+            response = requests.post(api_url, json={"question": order})
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Buddy API call failed (attempt {attempt + 1} of {retries}): {e}")
+            if attempt < retries - 1:
+                time.sleep(delay)
+            else:
+                return None
 
 @app.post("/assign_buddy_work/")
 async def assign_buddy_work(request: TTSRequest, background_tasks: BackgroundTasks):
@@ -101,10 +106,10 @@ async def assign_buddy_work(request: TTSRequest, background_tasks: BackgroundTas
     record_id = data['id']
 
     logging.info("Successfully created Airtable record. Returning response to client...")
-    # Return response to client immediately after scheduling background task
+    # Return response to client immediately
     response_message = {"message": "Successfully assigned Buddy Work"}
-
-    # Schedule the background task without waiting
+    
+    # Return response before scheduling the background task
     background_tasks.add_task(process_buddy_work_background, request, record_id)
 
     return response_message

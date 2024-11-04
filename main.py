@@ -4,6 +4,7 @@ from pydantic import BaseModel
 import requests
 import datetime
 import logging
+import os
 
 # Logging configuration
 logging.basicConfig(level=logging.INFO)
@@ -47,14 +48,14 @@ def update_airtable_record(base_id, table_id, api_key, record_id, update_data):
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
-    response = requests.patch(url, json={"fields": update_data}, headers=headers)
+    response = requests.patch(url, json={"fields": update_data}, headers=headers, timeout=10)
     if not response.ok:
         raise HTTPException(status_code=response.status_code, detail=f"Failed to update record: {response.text}")
     return response.json()
 
 def call_buddy_api(flowise_id, order):
     api_url = f"https://ai.linkbricks.com/api/v1/prediction/{flowise_id}"
-    response = requests.post(api_url, json={"question": order})
+    response = requests.post(api_url, json={"question": order}, timeout=10)
     if response.ok:
         return response.json()
     else:
@@ -74,32 +75,28 @@ async def assign_buddy_work(request: TTSRequest, background_tasks: BackgroundTas
         "Content-Type": "application/json"
     }
     body = {
-        "records": [
-            {
-                "fields": {
-                    "user_id": request.id,
-                    "user_pwd": request.pwd,
-                    "category": request.category,
-                    "order": request.order,
-                    "timezone": int(request.timezone),
-                    "status": "running",
-                    "chat_id": request.chat_id,
-                    "session_id": request.session_id
-                }
-            }
-        ]
+        "fields": {
+            "user_id": request.id,
+            "user_pwd": request.pwd,
+            "category": request.category,
+            "order": request.order,
+            "timezone": int(request.timezone),
+            "status": "running",
+            "chat_id": request.chat_id,
+            "session_id": request.session_id
+        }
     }
 
     logging.info("Creating Airtable record...")
-    response = requests.post(url, json=body, headers=headers)
+    response = requests.post(url, json=body, headers=headers, timeout=10)
     if not response.ok:
         logging.error(f"Failed to create record: {response.text}")
         # Update status to assign_failed if record creation fails
-        body["records"][0]["fields"]["status"] = "assign_failed"
+        body["fields"]["status"] = "assign_failed"
         raise HTTPException(status_code=response.status_code, detail=f"Failed to create record: {response.text}")
 
     data = response.json()
-    record_id = data['records'][0]['id']
+    record_id = data['id']
 
     logging.info("Successfully created Airtable record. Scheduling background task...")
 
@@ -138,4 +135,5 @@ def process_buddy_work_background(request: TTSRequest, record_id: str):
         update_airtable_record(request.base_id, request.table_id, request.airtable_api_key, record_id, update_data)
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port, http='h11', keep_alive_timeout=5)

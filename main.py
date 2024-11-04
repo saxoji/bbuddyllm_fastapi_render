@@ -37,6 +37,27 @@ class TTSRequest(BaseModel):
     session_id: str
     category: str
 
+def create_airtable_record(base_id: str, table_id: str, api_key: str, fields: dict):
+    """Synchronously create an Airtable record and return the record ID"""
+    url = f"https://api.airtable.com/v0/{base_id}/{table_id}"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    body = {
+        "records": [
+            {
+                "fields": fields
+            }
+        ]
+    }
+    
+    response = requests.post(url, json=body, headers=headers)
+    if not response.ok:
+        raise HTTPException(status_code=response.status_code, detail=f"Failed to create record: {response.text}")
+    
+    return response.json()['records'][0]['id']
+
 async def update_airtable_record(base_id, table_id, api_key, record_id, update_data):
     url = f"https://api.airtable.com/v0/{base_id}/{table_id}/{record_id}"
     headers = {
@@ -62,42 +83,39 @@ async def assign_buddy_work(request: TTSRequest, background_tasks: BackgroundTas
     if request.auth_key != REQUIRED_AUTH_KEY:
         raise HTTPException(status_code=403, detail="Invalid authentication key")
 
-    # Create Airtable record
-    url = f"https://api.airtable.com/v0/{request.base_id}/{request.table_id}"
-    headers = {
-        "Authorization": f"Bearer {request.airtable_api_key}",
-        "Content-Type": "application/json"
-    }
-    body = {
-        "records": [
-            {
-                "fields": {
-                    "user_id": request.id,
-                    "user_pwd": request.pwd,
-                    "category": request.category,
-                    "order": request.order,
-                    "timezone": int(request.timezone),
-                    "status": "running",
-                    "chat_id": request.chat_id,
-                    "session_id": request.session_id
-                }
-            }
-        ]
-    }
+    try:
+        # Prepare initial record fields
+        initial_fields = {
+            "user_id": request.id,
+            "user_pwd": request.pwd,
+            "category": request.category,
+            "order": request.order,
+            "timezone": int(request.timezone),
+            "status": "running",
+            "chat_id": request.chat_id,
+            "session_id": request.session_id
+        }
 
-    response = requests.post(url, json=body, headers=headers)
-    if not response.ok:
-        # Update status to assign_failed if record creation fails
-        body["records"][0]["fields"]["status"] = "assign_failed"
-        raise HTTPException(status_code=response.status_code, detail=f"Failed to create record: {response.text}")
+        # Create Airtable record synchronously and get the record ID
+        record_id = create_airtable_record(
+            request.base_id,
+            request.table_id,
+            request.airtable_api_key,
+            initial_fields
+        )
 
-    data = response.json()
-    record_id = data['records'][0]['id']
+        # Add background task
+        background_tasks.add_task(
+            process_buddy_work_background,
+            request,
+            record_id
+        )
 
-    # Schedule the background task
-    background_tasks.add_task(process_buddy_work_background, request, record_id)
+        # Return success immediately after record creation
+        return {"message": "Successfully assigned Buddy Work", "record_id": record_id}
 
-    return {"message": "Successfully assigned Buddy Work"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to assign work: {str(e)}")
 
 async def process_buddy_work_background(request: TTSRequest, record_id: str):
     try:
